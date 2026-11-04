@@ -1,0 +1,40 @@
+# Synchronisation planifiée weight -> time estimate.
+# Dépôt outillage dédié (ex. plateforme/outils-gitlab) contenant weight_to_estimate.py.
+#
+# Prérequis
+#   1. Group access token « sync-weight-estimate » sur le groupe cible :
+#      scope api, rôle Planner, expiration ≤ 1 an (le script alerte 30 jours avant).
+#   2. Variable CI/CD GITLAB_TOKEN : masquée + protégée. Le schedule doit viser
+#      une branche protégée, sinon la variable n'est pas exposée au job.
+#   3. Variables du schedule : TARGET_GROUP (ex. plateforme) et WEIGHT_SCALE
+#      (ex. 4h ou "1=2h,2=4h,3=1d,5=2d,8=1w"). Aucune valeur par défaut :
+#      variable absente => échec explicite du job (code 2).
+#   4. Image : Python >= 3.10 et CA interne dans le magasin système (cf. B.10),
+#      promue dans harbor/platform et référencée par digest.
+#   5. Nexus PyPI : python-gitlab + requests, requests-toolbelt, urllib3, idna,
+#      charset-normalizer, certifi.
+#
+# Planification : Build > Pipeline schedules, sur la branche protégée.
+
+stages: [sync]
+
+weight-to-estimate:
+  stage: sync
+  image: harbor.interne/platform/ci-python-312@sha256:<digest>
+  tags: [ci-interne]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"     # lancement manuel, mêmes variables à saisir
+  resource_group: weight-to-estimate       # jamais deux synchronisations simultanées
+  timeout: 15m
+  variables:
+    PIP_INDEX_URL: https://nexus.interne/repository/pypi-group/simple
+    PIP_CERT: /etc/pki/tls/certs/ca-bundle.crt          # pip : CA interne
+    GITLAB_CA_BUNDLE: /etc/pki/tls/certs/ca-bundle.crt  # requests embarque certifi, sans la CA interne
+    PYTHONUNBUFFERED: "1"
+    # Si le runner définit HTTPS_PROXY : NO_PROXY doit couvrir GitLab et Nexus,
+    # sinon les appels internes partent vers le proxy sortant.
+    # NO_PROXY: "$CI_SERVER_HOST,nexus.interne"
+  script:
+    - python3 -m pip install --no-cache-dir "python-gitlab==8.6.0"   # version présente dans Nexus
+    - python3 weight_to_estimate.py --group "$TARGET_GROUP" --scale "$WEIGHT_SCALE" --apply
